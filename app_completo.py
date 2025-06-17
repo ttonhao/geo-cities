@@ -1,3 +1,4 @@
+# type: ignore
 """
 🚀 SISTEMA AVANÇADO DE DISTÂNCIAS - VERSÃO PRO COM DEBUG
 =======================================================

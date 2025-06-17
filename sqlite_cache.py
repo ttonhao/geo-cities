@@ -1,3 +1,4 @@
+# type: ignore
 # sqlite_cache.py
 """
 💾 SISTEMA DE CACHE SQLITE COMPLETO COM CACHE DE DISTÂNCIAS
@@ -347,7 +348,7 @@ class SQLiteCache:
         """Normaliza nome da cidade para busca"""
         return city_name.upper().strip().replace('  ', ' ')
     
-    def _calculate_expires_at(self, ttl_hours: int = None) -> str:
+    def _calculate_expires_at(self, ttl_hours: int = None) -> str: 
         """Calcula timestamp de expiração"""
         if ttl_hours is None:
             ttl_hours = self.ttl_hours

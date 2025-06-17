@@ -1,10 +1,12 @@
- # type: ignore
+# type: ignore
+# # app_completo_sqlite.py
 """
-🚀 SISTEMA AVANÇADO DE DISTÂNCIAS - VERSÃO PRO COM SQLITE
-========================================================
+🚀 SISTEMA AVANÇADO DE DISTÂNCIAS - VERSÃO PRO COM SQLITE E CACHE DE DISTÂNCIAS
+=============================================================================
 
-VERSÃO COMPLETA: Sistema original + Cache SQLite avançado
+VERSÃO COMPLETA: Sistema original + Cache SQLite + Cache de Distâncias
 - ✅ Cache SQLite persistente entre sessões
+- ✅ Cache de DISTÂNCIAS calculadas (NEW!)
 - ✅ Performance otimizada com índices
 - ✅ TTL automático e limpeza
 - ✅ Backup e restore automático
@@ -12,10 +14,9 @@ VERSÃO COMPLETA: Sistema original + Cache SQLite avançado
 - ✅ Dashboard Analytics completo
 - ✅ Mapas Interativos completos
 - ✅ Painel de administração do banco
-- ✅ Migração automática de dados
-- ✅ Sistema de Debug integrado
+- ✅ Correção de refresh da página
 
-Versão: 3.1.0 - Pro SQLite (Completa)
+Versão: 3.2.0 - Pro SQLite + Distance Cache
 """
 
 import streamlit as st
@@ -40,9 +41,6 @@ from datetime import datetime, timedelta
 import numpy as np
 import warnings
 import logging
-
-# Importar sistema SQLite (cole o código anterior antes desta linha ou em arquivo separado)
-# from sqlite_cache_system import SQLiteCache, create_sqlite_cache_instance, migrate_from_memory_cache
 
 # ================================
 # CONFIGURAÇÕES DE DEBUG E AMBIENTE
@@ -131,7 +129,7 @@ def debug_timing(func):
 
 # Configuração da página
 st.set_page_config(
-    page_title="🚀 Sistema Avançado de Distâncias - SQLite",
+    page_title="🚀 Sistema Avançado de Distâncias - SQLite + Distance Cache",
     page_icon="💾",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -197,6 +195,14 @@ st.markdown("""
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
     }
     
+    .distance-cache-panel {
+        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        padding: 1rem;
+        border-radius: 12px;
+        margin: 1rem 0;
+        border-left: 4px solid #06d6a0;
+    }
+    
     .database-info {
         background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
         padding: 1rem;
@@ -224,22 +230,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================================
-# SISTEMA SQLITE CACHE INTEGRADO
+# SISTEMA SQLITE CACHE COM DISTÂNCIAS
 # ================================
 
-# Cole aqui o código completo da classe SQLiteCache do artefato anterior
-# Ou importe de arquivo separado: from sqlite_cache_system import SQLiteCache
-
-# Para este exemplo, vou incluir uma versão simplificada:
-class SQLiteCacheSimplified:
-    """Versão simplificada do cache SQLite para demonstração"""
+# Versão simplificada do cache SQLite com distâncias para demonstração
+class SQLiteCacheWithDistances:
+    """Cache SQLite com suporte a cache de distâncias"""
     
-    def __init__(self, db_path="cache/geocoding_cache.db", ttl_hours=24):
+    def __init__(self, db_path="cache/geocoding_cache.db", ttl_hours=24, distance_ttl_hours=168):
         self.db_path = db_path
         self.ttl_hours = ttl_hours
+        self.distance_ttl_hours = distance_ttl_hours  # 7 dias para distâncias
         self._ensure_db_directory()
         self._initialize_database()
-        debugger.info(f"SQLite Cache inicializado: {db_path}")
+        debugger.info(f"SQLite Cache com distâncias inicializado: {db_path}")
     
     def _ensure_db_directory(self):
         db_dir = os.path.dirname(self.db_path)
@@ -248,6 +252,8 @@ class SQLiteCacheSimplified:
     
     def _initialize_database(self):
         conn = sqlite3.connect(self.db_path)
+        
+        # Tabela de coordenadas
         conn.execute("""
             CREATE TABLE IF NOT EXISTS coordinates (
                 id INTEGER PRIMARY KEY,
@@ -260,16 +266,56 @@ class SQLiteCacheSimplified:
                 hits INTEGER DEFAULT 0
             )
         """)
+        
+        # Nova tabela de distâncias
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS distances (
+                id INTEGER PRIMARY KEY,
+                route_hash TEXT UNIQUE,
+                origin_city TEXT,
+                destination_city TEXT,
+                distance_km REAL,
+                duration_minutes REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                hits INTEGER DEFAULT 0,
+                source TEXT DEFAULT 'osrm'
+            )
+        """)
+        
+        # Tabela de estatísticas
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cache_stats (
                 date DATE PRIMARY KEY,
-                hits INTEGER DEFAULT 0,
-                misses INTEGER DEFAULT 0,
-                saves INTEGER DEFAULT 0
+                coord_hits INTEGER DEFAULT 0,
+                coord_misses INTEGER DEFAULT 0,
+                coord_saves INTEGER DEFAULT 0,
+                distance_hits INTEGER DEFAULT 0,
+                distance_misses INTEGER DEFAULT 0,
+                distance_saves INTEGER DEFAULT 0
             )
         """)
+        
+        # Índices para performance
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_coordinates_hash ON coordinates(city_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_distances_hash ON distances(route_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_distances_expires ON distances(expires_at)")
+        
         conn.commit()
         conn.close()
+    
+    def _get_route_hash(self, origin_city: str, destination_city: str) -> str:
+        """Gera hash único para o par origem-destino"""
+        origin_norm = origin_city.upper().strip()
+        dest_norm = destination_city.upper().strip()
+        
+        # Ordem alfabética para consistência (A->B = B->A)
+        if origin_norm < dest_norm:
+            route_string = f"{origin_norm}|{dest_norm}"
+        else:
+            route_string = f"{dest_norm}|{origin_norm}"
+        
+        return hashlib.sha256(route_string.encode('utf-8')).hexdigest()
     
     def save_coordinates(self, city_name, coordinates):
         city_hash = hashlib.md5(city_name.upper().encode()).hexdigest()
@@ -284,7 +330,7 @@ class SQLiteCacheSimplified:
         conn.commit()
         conn.close()
         
-        self._update_stats('save')
+        self._update_stats('coord_save')
         debugger.debug(f"SQLite: Coordenadas salvas - {city_name}")
     
     def get_coordinates(self, city_name):
@@ -300,8 +346,8 @@ class SQLiteCacheSimplified:
         
         if row is None:
             conn.close()
-            self._update_stats('miss')
-            debugger.debug(f"SQLite: Cache MISS - {city_name}")
+            self._update_stats('coord_misses')
+            debugger.debug(f"SQLite: Cache MISS coordenadas - {city_name}")
             return None
         
         # Verificar expiração
@@ -310,8 +356,8 @@ class SQLiteCacheSimplified:
             conn.execute("DELETE FROM coordinates WHERE city_hash = ?", (city_hash,))
             conn.commit()
             conn.close()
-            self._update_stats('miss')
-            debugger.debug(f"SQLite: Cache EXPIRED - {city_name}")
+            self._update_stats('coord_misses')
+            debugger.debug(f"SQLite: Cache EXPIRED coordenadas - {city_name}")
             return None
         
         # Atualizar hits
@@ -320,9 +366,70 @@ class SQLiteCacheSimplified:
         conn.close()
         
         coordinates = [row[0], row[1]]
-        self._update_stats('hit')
-        debugger.debug(f"SQLite: Cache HIT - {city_name} -> {coordinates}")
+        self._update_stats('coord_hits')
+        debugger.debug(f"SQLite: Cache HIT coordenadas - {city_name} -> {coordinates}")
         return coordinates
+    
+    def save_distance(self, origin_city: str, destination_city: str, distance_km: float, duration_minutes: float):
+        """Salva distância calculada no cache"""
+        route_hash = self._get_route_hash(origin_city, destination_city)
+        expires_at = (datetime.now() + timedelta(hours=self.distance_ttl_hours)).isoformat()
+        
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            INSERT OR REPLACE INTO distances 
+            (route_hash, origin_city, destination_city, distance_km, duration_minutes, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (route_hash, origin_city, destination_city, distance_km, duration_minutes, expires_at))
+        conn.commit()
+        conn.close()
+        
+        self._update_stats('distance_save')
+        debugger.debug(f"SQLite: Distância salva - {origin_city} -> {destination_city} = {distance_km}km")
+    
+    def get_distance(self, origin_city: str, destination_city: str):
+        """Recupera distância do cache"""
+        route_hash = self._get_route_hash(origin_city, destination_city)
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.execute("""
+            SELECT distance_km, duration_minutes, expires_at, hits 
+            FROM distances WHERE route_hash = ?
+        """, (route_hash,))
+        
+        row = cursor.fetchone()
+        
+        if row is None:
+            conn.close()
+            self._update_stats('distance_misses')
+            debugger.debug(f"SQLite: Cache MISS distância - {origin_city} -> {destination_city}")
+            return None
+        
+        # Verificar expiração
+        expires_at = datetime.fromisoformat(row[2])
+        if datetime.now() > expires_at:
+            conn.execute("DELETE FROM distances WHERE route_hash = ?", (route_hash,))
+            conn.commit()
+            conn.close()
+            self._update_stats('distance_misses')
+            debugger.debug(f"SQLite: Cache EXPIRED distância - {origin_city} -> {destination_city}")
+            return None
+        
+        # Atualizar hits
+        conn.execute("UPDATE distances SET hits = hits + 1 WHERE route_hash = ?", (route_hash,))
+        conn.commit()
+        conn.close()
+        
+        result = {
+            'distancia_km': round(row[0], 2),
+            'tempo_min': round(row[1], 0),
+            'status': 'cache_hit',
+            'hits': row[3] + 1
+        }
+        
+        self._update_stats('distance_hits')
+        debugger.debug(f"SQLite: Cache HIT distância - {origin_city} -> {destination_city} = {result['distancia_km']}km")
+        return result
     
     def _update_stats(self, action):
         conn = sqlite3.connect(self.db_path)
@@ -334,13 +441,7 @@ class SQLiteCacheSimplified:
             conn.execute("INSERT INTO cache_stats (date) VALUES (?)", (today,))
         
         # Atualizar contador
-        if action == 'hit':
-            conn.execute("UPDATE cache_stats SET hits = hits + 1 WHERE date = ?", (today,))
-        elif action == 'miss':
-            conn.execute("UPDATE cache_stats SET misses = misses + 1 WHERE date = ?", (today,))
-        elif action == 'save':
-            conn.execute("UPDATE cache_stats SET saves = saves + 1 WHERE date = ?", (today,))
-        
+        conn.execute(f"UPDATE cache_stats SET {action} = {action} + 1 WHERE date = ?", (today,))
         conn.commit()
         conn.close()
     
@@ -349,40 +450,74 @@ class SQLiteCacheSimplified:
         
         # Stats de hoje
         today = datetime.now().date().isoformat()
-        cursor = conn.execute("SELECT hits, misses, saves FROM cache_stats WHERE date = ?", (today,))
+        cursor = conn.execute("""
+            SELECT coord_hits, coord_misses, coord_saves, 
+                   distance_hits, distance_misses, distance_saves 
+            FROM cache_stats WHERE date = ?
+        """, (today,))
         row = cursor.fetchone()
         
         if row is None:
-            hits = misses = saves = 0
+            coord_hits = coord_misses = coord_saves = 0
+            distance_hits = distance_misses = distance_saves = 0
         else:
-            hits, misses, saves = row
+            coord_hits, coord_misses, coord_saves, distance_hits, distance_misses, distance_saves = row
         
         # Stats globais
         cursor = conn.execute("SELECT COUNT(*) FROM coordinates WHERE expires_at > CURRENT_TIMESTAMP")
-        total_entries = cursor.fetchone()[0]
+        total_coordinates = cursor.fetchone()[0]
         
-        cursor = conn.execute("SELECT SUM(hits) FROM coordinates")
-        total_hits = cursor.fetchone()[0] or 0
+        cursor = conn.execute("SELECT COUNT(*) FROM distances WHERE expires_at > CURRENT_TIMESTAMP")
+        total_distances = cursor.fetchone()[0]
         
         conn.close()
         
-        total_requests = hits + misses
-        hit_rate = (hits / total_requests * 100) if total_requests > 0 else 0
+        # Calcular hit rates
+        total_coord_requests = coord_hits + coord_misses
+        coord_hit_rate = (coord_hits / total_coord_requests * 100) if total_coord_requests > 0 else 0
+        
+        total_distance_requests = distance_hits + distance_misses
+        distance_hit_rate = (distance_hits / total_distance_requests * 100) if total_distance_requests > 0 else 0
+        
+        total_hits = coord_hits + distance_hits
+        total_requests = total_coord_requests + total_distance_requests
+        overall_hit_rate = (total_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        file_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
         
         return {
-            'hits': hits,
-            'misses': misses,
-            'saves': saves,
+            # Coordenadas
+            'coord_hits': coord_hits,
+            'coord_misses': coord_misses,
+            'coord_saves': coord_saves,
+            'coord_hit_rate': round(coord_hit_rate, 2),
+            'total_coordinates': total_coordinates,
+            
+            # Distâncias
+            'distance_hits': distance_hits,
+            'distance_misses': distance_misses,
+            'distance_saves': distance_saves,
+            'distance_hit_rate': round(distance_hit_rate, 2),
+            'total_distances': total_distances,
+            
+            # Geral
+            'total_hits': total_hits,
             'total_requests': total_requests,
-            'hit_rate': round(hit_rate, 2),
-            'total_entries': total_entries,
-            'total_cache_hits': total_hits,
-            'database_path': self.db_path
+            'hit_rate': round(overall_hit_rate, 2),
+            'total_entries': total_coordinates + total_distances,
+            
+            # Sistema
+            'database_path': self.db_path,
+            'file_size_bytes': file_size,
+            'file_size_mb': round(file_size / (1024 * 1024), 2),
+            'ttl_hours': self.ttl_hours,
+            'distance_ttl_hours': self.distance_ttl_hours
         }
     
     def clear_cache(self):
         conn = sqlite3.connect(self.db_path)
         conn.execute("DELETE FROM coordinates")
+        conn.execute("DELETE FROM distances")
         conn.execute("DELETE FROM cache_stats")
         conn.commit()
         conn.close()
@@ -390,17 +525,23 @@ class SQLiteCacheSimplified:
     
     def cleanup_expired(self):
         conn = sqlite3.connect(self.db_path)
+        
         cursor = conn.execute("SELECT COUNT(*) FROM coordinates WHERE expires_at <= CURRENT_TIMESTAMP")
-        expired_count = cursor.fetchone()[0]
+        expired_coords = cursor.fetchone()[0]
+        
+        cursor = conn.execute("SELECT COUNT(*) FROM distances WHERE expires_at <= CURRENT_TIMESTAMP")
+        expired_distances = cursor.fetchone()[0]
         
         conn.execute("DELETE FROM coordinates WHERE expires_at <= CURRENT_TIMESTAMP")
+        conn.execute("DELETE FROM distances WHERE expires_at <= CURRENT_TIMESTAMP")
         conn.commit()
         conn.close()
         
-        if expired_count > 0:
-            debugger.info(f"SQLite: {expired_count} entradas expiradas removidas")
+        total_removed = expired_coords + expired_distances
+        if total_removed > 0:
+            debugger.info(f"SQLite: {expired_coords} coordenadas + {expired_distances} distâncias expiradas removidas")
         
-        return expired_count
+        return total_removed
     
     def get_database_info(self):
         file_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
@@ -408,6 +549,9 @@ class SQLiteCacheSimplified:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.execute("SELECT COUNT(*) FROM coordinates")
         total_coords = cursor.fetchone()[0]
+        
+        cursor = conn.execute("SELECT COUNT(*) FROM distances")
+        total_distances = cursor.fetchone()[0]
         
         cursor = conn.execute("SELECT COUNT(*) FROM cache_stats")
         total_stats = cursor.fetchone()[0]
@@ -419,26 +563,28 @@ class SQLiteCacheSimplified:
             'file_size_bytes': file_size,
             'file_size_mb': round(file_size / (1024 * 1024), 2),
             'total_coordinates': total_coords,
+            'total_distances': total_distances,
             'total_stats_days': total_stats,
-            'ttl_hours': self.ttl_hours
+            'ttl_hours': self.ttl_hours,
+            'distance_ttl_hours': self.distance_ttl_hours
         }
 
 # ================================
-# PROCESSAMENTO PARALELO COM SQLITE
+# PROCESSAMENTO PARALELO COM CACHE DE DISTÂNCIAS
 # ================================
 
 class ParallelProcessor:
     def __init__(self, max_workers=4):
         self.max_workers = max_workers
-        self.geocoder = Nominatim(user_agent="parallel_processor_sqlite_v3", timeout=20)
+        self.geocoder = Nominatim(user_agent="parallel_processor_distance_cache_v3", timeout=20) 
         
-        # Usar cache SQLite em vez de cache em memória
+        # Usar cache SQLite com distâncias
         if DEBUG_MODE:
-            self.cache = SQLiteCacheSimplified("cache/dev_geocoding_cache.db", ttl_hours=1)
+            self.cache = SQLiteCacheWithDistances("cache/dev_geocoding_cache.db", ttl_hours=1, distance_ttl_hours=24)
         else:
-            self.cache = SQLiteCacheSimplified("cache/prod_geocoding_cache.db", ttl_hours=24)
+            self.cache = SQLiteCacheWithDistances("cache/prod_geocoding_cache.db", ttl_hours=24, distance_ttl_hours=168)
         
-        debugger.info(f"ParallelProcessor inicializado com SQLite cache ({max_workers} workers)")
+        debugger.info(f"ParallelProcessor inicializado com cache de DISTÂNCIAS ({max_workers} workers)")
         
         # Migrar dados do cache em memória se existir
         self._migrate_memory_cache()
@@ -506,13 +652,30 @@ class ParallelProcessor:
             return None
     
     @debug_timing
-    def calculate_distance_with_retry(self, origin_coords, dest_coords, max_retries=3):
-        """Calcula distância com retry automático"""
+    def calculate_distance_with_retry(self, origin_coords, dest_coords, origin_city, destination_city, max_retries=3):
+        """Calcula distância com cache de distâncias e retry automático"""
+        
+        # *** NOVO: Verificar cache de distâncias primeiro ***
+        cached_distance = self.cache.get_distance(origin_city, destination_city)
+        if cached_distance:
+            debugger.info(f"Cache HIT distância: {origin_city} -> {destination_city} = {cached_distance['distancia_km']}km")
+            return cached_distance
+        
+        debugger.debug(f"Cache MISS distância - calculando: {origin_city} -> {destination_city}")
+        
+        # Calcular distância via API
         for attempt in range(max_retries):
             try:
                 url = f"http://router.project-osrm.org/route/v1/driving/{origin_coords[0]},{origin_coords[1]};{dest_coords[0]},{dest_coords[1]}"
                 params = {'overview': 'false', 'geometries': 'geojson'}
-                debugger.debug(f"Calculando distância: {url} (tentativa {attempt + 1}) params={params}")
+                
+                debug_breakpoint("Calculando distância via API", {
+                    'origin_city': origin_city,
+                    'destination_city': destination_city,
+                    'attempt': attempt + 1,
+                    'cache_miss': True
+                })
+                
                 response = requests.get(url, params=params, timeout=25)
                 
                 if response.status_code == 200:
@@ -523,34 +686,44 @@ class ParallelProcessor:
                         distance_km = route['distance'] / 1000
                         duration_min = route['duration'] / 60
                         
-                        return {
+                        result = {
                             'distancia_km': round(distance_km, 2),
                             'tempo_min': round(duration_min, 0),
                             'status': 'sucesso'
                         }
+                        
+                        # *** NOVO: Salvar no cache de distâncias ***
+                        self.cache.save_distance(origin_city, destination_city, distance_km, duration_min)
+                        
+                        debugger.info(f"Distância calculada e salva: {origin_city} -> {destination_city} = {distance_km:.2f}km")
+                        return result
+                
+                debugger.warning(f"Tentativa {attempt + 1} falhou: status {response.status_code}")
                 
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2 ** attempt)  # Backoff exponencial
                     
             except Exception as e:
+                debugger.error(f"Erro na tentativa {attempt + 1}: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
         
+        debugger.error("Todas as tentativas de cálculo falharam")
         return {'status': 'erro_calculo', 'distancia_km': None, 'tempo_min': None}
     
     @debug_timing
     def process_linha_paralela(self, linha_data):
-        """Processa uma linha com cache SQLite"""
+        """Processa uma linha com cache SQLite e cache de distâncias"""
         linha_excel = linha_data['linha_excel']
         origem = linha_data['origem']
         destinos = linha_data['destinos']
         
-        debug_breakpoint("Processamento com SQLite", {
+        debug_breakpoint("Processamento com cache de distâncias", {
             'linha_excel': linha_excel,
             'origem': origem,
             'total_destinos': len(destinos),
-            'cache_type': 'SQLite'
+            'cache_type': 'SQLite + Distance Cache'
         })
         
         resultado = {
@@ -589,7 +762,7 @@ class ParallelProcessor:
                 destino, coords = future.result()
                 destinos_com_coords.append((destino, coords))
         
-        # Cálculo paralelo das distâncias
+        # Cálculo paralelo das distâncias COM CACHE
         def calcular_distancia_destino(item):
             destino, dest_coords = item
             if not dest_coords:
@@ -600,7 +773,8 @@ class ParallelProcessor:
                     'status': 'coordenadas_nao_encontradas'
                 }
             
-            resultado_calc = self.calculate_distance_with_retry(origin_coords, dest_coords)
+            # *** PASSOU ORIGEM E DESTINO PARA O CACHE ***
+            resultado_calc = self.calculate_distance_with_retry(origin_coords, dest_coords, origem, destino)
             resultado_calc['destino'] = destino
             
             time.sleep(0.1)
@@ -613,7 +787,7 @@ class ParallelProcessor:
                 calc_resultado = future.result()
                 resultado['destinos_calculados'].append(calc_resultado)
                 
-                if calc_resultado['status'] == 'sucesso':
+                if calc_resultado['status'] in ['sucesso', 'cache_hit']:
                     resultado['sucessos'] += 1
                 else:
                     resultado['erros'] += 1
@@ -633,7 +807,7 @@ class ParallelProcessor:
     
     @debug_timing
     def process_all_lines_parallel(self, linhas_processaveis):
-        """Processa todas as linhas em paralelo com SQLite"""
+        """Processa todas as linhas em paralelo com cache de distâncias"""
         start_time = time.time()
         
         resultados = []
@@ -658,7 +832,7 @@ class ParallelProcessor:
             'media_tempo_por_linha': round(sum(r['tempo_processamento'] for r in resultados) / len(resultados), 2),
             'processamento_paralelo': True,
             'workers_utilizados': self.max_workers,
-            'cache_type': 'SQLite'
+            'cache_type': 'SQLite + Distance Cache'
         }
         
         return resultados, stats_globais
@@ -722,9 +896,9 @@ class AnalyticsDashboard:
                 cache_type = ultimo_processamento.get('cache_type', 'Memory')
                 st.metric("💾 Cache Type", cache_type)
             
-            # Mostrar se está usando SQLite
-            if ultimo_processamento.get('cache_type') == 'SQLite':
-                st.success("✅ **Sistema SQLite ativo** - Cache persistente entre sessões!")
+            # Mostrar se está usando cache de distâncias
+            if 'Distance Cache' in ultimo_processamento.get('cache_type', ''):
+                st.success("✅ **Cache de Distâncias ativo** - Rotas já calculadas são reutilizadas!")
             
             # Gráficos de performance
             st.markdown("#### 📈 Performance ao Longo do Tempo")
@@ -760,55 +934,69 @@ class AnalyticsDashboard:
             st.info("📊 Execute um processamento para ver analytics detalhados")
     
     def show_cache_analytics(self, cache_stats):
-        st.markdown("#### 💾 Analytics do Cache SQLite")
+        st.markdown("#### 💾 Analytics do Cache SQLite + Distâncias")
         
+        # Métricas de coordenadas
+        st.markdown("##### 📍 Cache de Coordenadas")
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("🎯 Cache Hits", cache_stats['hits'])
+            st.metric("🎯 Coord Hits", cache_stats['coord_hits'])
         with col2:
-            st.metric("❌ Cache Misses", cache_stats['misses'])
+            st.metric("❌ Coord Misses", cache_stats['coord_misses'])
         with col3:
-            st.metric("💾 Itens Salvos", cache_stats['saves'])
+            st.metric("💾 Coord Saves", cache_stats['coord_saves'])
         with col4:
-            st.metric("📈 Hit Rate", f"{cache_stats['hit_rate']:.1f}%")
+            st.metric("📈 Coord Hit Rate", f"{cache_stats['coord_hit_rate']:.1f}%")
         
-        # Informações específicas do SQLite
+        # Métricas de distâncias
+        st.markdown("##### 🛣️ Cache de Distâncias")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("🎯 Dist Hits", cache_stats['distance_hits'])
+        with col2:
+            st.metric("❌ Dist Misses", cache_stats['distance_misses'])
+        with col3:
+            st.metric("💾 Dist Saves", cache_stats['distance_saves'])
+        with col4:
+            st.metric("📈 Dist Hit Rate", f"{cache_stats['distance_hit_rate']:.1f}%")
+        
+        # Informações gerais
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.metric("🗃️ Total Entradas", cache_stats['total_entries'])
+            st.metric("🗃️ Total Coordenadas", cache_stats['total_coordinates'])
         with col2:
-            st.metric("📊 Total Cache Hits", cache_stats['total_cache_hits'])
+            st.metric("🛣️ Total Distâncias", cache_stats['total_distances'])
         with col3:
-            if 'file_size_mb' in cache_stats:
-                st.metric("💽 Tamanho DB", f"{cache_stats.get('file_size_mb', 0):.2f} MB")
+            st.metric("💽 Tamanho DB", f"{cache_stats.get('file_size_mb', 0):.2f} MB")
         
-        # Gráfico de distribuição
+        # Gráfico de distribuição geral
         if cache_stats['total_requests'] > 0:
             fig_cache = go.Figure(data=[
                 go.Pie(
-                    labels=['Cache Hits', 'Cache Misses'],
-                    values=[cache_stats['hits'], cache_stats['misses']],
+                    labels=['Cache Hits (Geral)', 'Cache Misses (Geral)'],
+                    values=[cache_stats['total_hits'], cache_stats['total_requests'] - cache_stats['total_hits']],
                     hole=0.4,
-                    marker_colors=['#667eea', '#764ba2']
+                    marker_colors=['#11998e', '#e74c3c']
                 )
             ])
             fig_cache.update_layout(
-                title="💾 Distribuição SQLite Cache: Hits vs Misses",
+                title="💾 Performance Geral do Cache (Coordenadas + Distâncias)",
                 height=300
             )
             st.plotly_chart(fig_cache, use_container_width=True)
 
 # ================================
-# PAINEL DE ADMINISTRAÇÃO SQLITE
+# PAINEL DE ADMINISTRAÇÃO SQLITE COM DISTÂNCIAS
 # ================================
 
 def show_sqlite_admin_panel(cache_system):
-    """Painel de administração avançado do SQLite"""
+    """Painel de administração avançado do SQLite com cache de distâncias"""
     
     st.markdown('<div class="sqlite-panel">', unsafe_allow_html=True)
-    st.markdown("### 💾 Administração do Banco SQLite")
+    st.markdown("### 💾 Administração do Banco SQLite + Distâncias")
     
     # Informações do banco
     db_info = cache_system.get_database_info()
@@ -821,11 +1009,28 @@ def show_sqlite_admin_panel(cache_system):
     
     with col2:
         st.metric("🗃️ Coordenadas", db_info['total_coordinates'])
-        st.metric("📊 Dias Stats", db_info['total_stats_days'])
+        st.metric("🛣️ Distâncias", db_info['total_distances'])
     
     with col3:
-        st.metric("⏰ TTL", f"{db_info['ttl_hours']}h")
-        st.metric("📍 Path", "..." + db_info['database_path'][-20:])
+        st.metric("⏰ TTL Coords", f"{db_info['ttl_hours']}h")
+        st.metric("⏰ TTL Dist", f"{db_info['distance_ttl_hours']}h")
+    
+    # Painel específico do cache de distâncias
+    st.markdown('<div class="distance-cache-panel">', unsafe_allow_html=True)
+    st.markdown("#### 🛣️ Cache de Distâncias")
+    
+    cache_stats = cache_system.get_cache_stats()
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("📊 Hit Rate Distâncias", f"{cache_stats['distance_hit_rate']:.1f}%")
+    with col2:
+        st.metric("💾 Distâncias Salvas", cache_stats['total_distances'])
+    with col3:
+        st.metric("⏰ TTL", f"{cache_stats['distance_ttl_hours']}h")
+    
+    st.info("🚀 **Cache de Distâncias ativo** - Rotas já calculadas são reutilizadas automaticamente!")
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # Ações de administração
     st.markdown("#### 🛠️ Ações de Administração")
@@ -847,24 +1052,12 @@ def show_sqlite_admin_panel(cache_system):
             if st.checkbox("⚠️ Confirmar limpeza total"):
                 cache_system.clear_cache()
                 st.success("✅ Cache limpo completamente")
-                st.rerun()
+                # NÃO USAR st.rerun() para evitar refresh
     
     with col3:
         if st.button("📊 Atualizar Stats", help="Atualiza estatísticas"):
-            st.rerun()
-    
-    # Busca de cidades (se disponível na versão completa)
-    st.markdown("#### 🔍 Busca no Cache")
-    
-    search_term = st.text_input("🏙️ Buscar cidade:", placeholder="Digite o nome da cidade...")
-    
-    if search_term:
-        # Simular busca (na versão completa seria cache_system.search_cities())
-        coords = cache_system.get_coordinates(search_term.upper())
-        if coords:
-            st.success(f"✅ **{search_term.upper()}** encontrada: {coords}")
-        else:
-            st.warning(f"❌ **{search_term.upper()}** não encontrada no cache")
+            # NÃO USAR st.rerun() - apenas recarregará naturalmente
+            pass
     
     # Informações técnicas
     with st.expander("🔧 Informações Técnicas Detalhadas"):
@@ -913,9 +1106,12 @@ class InteractiveMapper:
             
             cor = cores[i % len(cores)]
             
+            # Indicar se veio do cache
+            cache_icon = "💾" if destino_data.get('status') == 'cache_hit' else "🆕"
+            
             folium.Marker(
                 [dest_lat, dest_lon],
-                popup=f"📍 {destino_data['destino']}<br>📏 {destino_data['distancia_km']} km<br>⏱️ {destino_data['tempo_min']} min",
+                popup=f"📍 {destino_data['destino']}<br>📏 {destino_data['distancia_km']} km<br>⏱️ {destino_data['tempo_min']} min<br>{cache_icon} Cache",
                 tooltip=f"{destino_data['destino']} - {destino_data['distancia_km']} km",
                 icon=folium.Icon(color=cor, icon='map-marker', prefix='fa')
             ).add_to(m)
@@ -936,11 +1132,11 @@ class InteractiveMapper:
 
 class AdvancedDistanceSystemSQLite:
     def __init__(self):
-        # Usar processador com SQLite
+        # Usar processador com SQLite + cache de distâncias
         self.parallel_processor = ParallelProcessor(max_workers=6)
         self.analytics = AnalyticsDashboard()
         self.mapper = InteractiveMapper()
-        debugger.info("AdvancedDistanceSystemSQLite inicializado com cache SQLite")
+        debugger.info("AdvancedDistanceSystemSQLite inicializado com cache de DISTÂNCIAS")
         
     @debug_timing
     def analyze_spreadsheet_advanced(self, df):
@@ -975,7 +1171,7 @@ class AdvancedDistanceSystemSQLite:
                 'linhas_processaveis': linhas_processaveis,
                 'total_linhas_validas': len(linhas_processaveis),
                 'total_calculos': sum(linha['total_destinos'] for linha in linhas_processaveis),
-                'estimativa_tempo_paralelo': sum(linha['total_destinos'] for linha in linhas_processaveis) * 0.1 / 60,
+                'estimativa_tempo_paralelo': sum(linha['total_destinos'] for linha in linhas_processaveis) * 0.05 / 60,  # Menor devido ao cache
                 'estimativa_tempo_sequencial': sum(linha['total_destinos'] for linha in linhas_processaveis) * 0.3 / 60
             }
             
@@ -1004,7 +1200,7 @@ def show_debug_panel():
     
     with st.sidebar:
         st.markdown('<div class="debug-panel">', unsafe_allow_html=True)
-        st.markdown("### 🐛 Debug Panel SQLite")
+        st.markdown("### 🐛 Debug Panel Distance Cache")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -1032,33 +1228,42 @@ def show_debug_panel():
         if st.button("🗑️ Limpar Logs Debug"):
             st.session_state.debug_logs = []
             st.success("Logs limpos!")
-            st.rerun()
+            # NÃO USAR st.rerun()
         
         st.markdown('</div>', unsafe_allow_html=True)
 
 def main():
-    """Função principal COMPLETA com SQLite integrado"""
+    """Função principal COMPLETA com SQLite + Cache de Distâncias"""
     
-    debugger.info("=== INICIANDO APLICAÇÃO COM SQLITE ===")
+    debugger.info("=== INICIANDO APLICAÇÃO COM CACHE DE DISTÂNCIAS ===")
     
     # Painel de debug
     show_debug_panel()
     
     # Header
-    header_text = "🚀 Sistema Avançado de Distâncias - SQLite"
+    header_text = "🚀 Sistema Avançado de Distâncias - SQLite + Distance Cache"
     if DEBUG_MODE:
         header_text += " (Debug Mode)"
     
     st.markdown(f"""
     <div class="main-header">
         <h1>{header_text}</h1>
-        <h3>💾 Cache SQLite • Processamento Paralelo • Analytics • Mapas Interativos</h3>
-        <p>Versão 3.1.0 - Pro SQLite (Completa)</p>
+        <h3>💾 Cache SQLite • 🛣️ Cache de Distâncias • Processamento Paralelo • Analytics</h3>
+        <p>Versão 3.2.0 - Pro SQLite + Distance Cache</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # Inicializar sistema com SQLite
+    # Inicializar sistema com SQLite + cache de distâncias
     sistema = AdvancedDistanceSystemSQLite()
+    
+    # *** CONTROLE DE ESTADO DOS RESULTADOS ***
+    # Inicializar resultados no session_state para evitar perda após refresh
+    if 'processamento_resultados' not in st.session_state:
+        st.session_state.processamento_resultados = None
+    if 'processamento_stats' not in st.session_state:
+        st.session_state.processamento_stats = None
+    if 'processamento_concluido' not in st.session_state:
+        st.session_state.processamento_concluido = False
     
     # Sidebar com configurações
     with st.sidebar:
@@ -1070,11 +1275,11 @@ def main():
         sistema.parallel_processor.max_workers = max_workers
         
         # Cache SQLite controls
-        st.markdown("#### 💾 Cache SQLite")
+        st.markdown("#### 💾 Cache SQLite + Distâncias")
         cache_stats = sistema.parallel_processor.cache.get_cache_stats()
         
         if cache_stats['total_requests'] > 0:
-            st.metric("📊 Hit Rate", f"{cache_stats['hit_rate']:.1f}%")
+            st.metric("📊 Hit Rate Geral", f"{cache_stats['hit_rate']:.1f}%")
             st.metric("🗃️ Entradas", cache_stats['total_entries'])
         
         # Painel de administração SQLite
@@ -1084,7 +1289,7 @@ def main():
         show_analytics = st.checkbox("📊 Mostrar Analytics", value=True)
         show_maps = st.checkbox("🗺️ Mostrar Mapas", value=True)
         
-        st.success("💾 SQLite Cache Ativo")
+        st.success("💾 SQLite + 🛣️ Distance Cache Ativo")
     
     # Analytics Dashboard
     if show_analytics:
@@ -1095,14 +1300,14 @@ def main():
     uploaded_file = st.file_uploader(
         "📁 Upload da Planilha Excel",
         type=['xlsx', 'xls'],
-        help="Sistema com cache SQLite persistente e processamento paralelo otimizado"
+        help="Sistema com cache SQLite persistente E cache de distâncias"
     )
     
     if uploaded_file is not None:
-        debug_breakpoint("Arquivo carregado para processamento SQLite", {
+        debug_breakpoint("Arquivo carregado para processamento com cache de distâncias", {
             'filename': uploaded_file.name,
             'size': uploaded_file.size,
-            'cache_type': 'SQLite'
+            'cache_type': 'SQLite + Distance Cache'
         })
         
         with st.spinner("🔍 Análise avançada da planilha..."):
@@ -1110,7 +1315,7 @@ def main():
             analysis = sistema.analyze_spreadsheet_advanced(df)
         
         if analysis:
-            st.success("✅ Planilha analisada - Sistema SQLite ativo!")
+            st.success("✅ Planilha analisada - Sistema SQLite + Cache de Distâncias ativo!")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -1119,133 +1324,155 @@ def main():
             with col2:
                 st.metric("📏 Cálculos Totais", analysis['total_calculos'])
             with col3:
-                st.metric("⏱️ Tempo Est. (Paralelo)", f"{analysis['estimativa_tempo_paralelo']:.1f} min")
+                st.metric("⏱️ Tempo Est.", f"{analysis['estimativa_tempo_paralelo']:.1f} min")
             with col4:
                 speedup = analysis['estimativa_tempo_sequencial'] / analysis['estimativa_tempo_paralelo']
                 st.metric("🚀 Speedup", f"{speedup:.1f}x")
             
-            # Info do SQLite
-            st.info("💾 **Cache SQLite ativo** - As coordenadas serão salvas permanentemente e reutilizadas entre sessões!")
+            # Info do cache de distâncias
+            st.info("💾 **Cache SQLite + 🛣️ Cache de Distâncias ativos** - Coordenadas E distâncias são reutilizadas!")
             
             # Processamento
-            if st.button("🚀 Processar com Sistema SQLite", type="primary", use_container_width=True):
+            if st.button("🚀 Processar com Cache de Distâncias", type="primary", use_container_width=True):
                 
-                debug_breakpoint("Início processamento com SQLite", {
+                debug_breakpoint("Início processamento com cache de distâncias", {
                     'total_linhas': analysis['total_linhas_validas'],
-                    'cache_type': 'SQLite',
+                    'cache_type': 'SQLite + Distance Cache',
                     'workers': max_workers
                 })
                 
-                st.markdown("### ⚡ Processamento Paralelo com Cache SQLite")
+                st.markdown("### ⚡ Processamento Paralelo com Cache SQLite + Distâncias")
                 
                 progress_bar = st.progress(0)
                 status_info = st.empty()
                 
                 start_time = time.time()
                 
-                status_info.info("🚀 Iniciando processamento com cache SQLite...")
+                status_info.info("🚀 Iniciando processamento com cache de distâncias...")
                 progress_bar.progress(20)
                 
-                with st.spinner("Executando processamento com cache SQLite otimizado..."):
+                with st.spinner("Executando processamento com cache SQLite + distâncias..."):
                     resultados, stats_globais = sistema.parallel_processor.process_all_lines_parallel(
                         analysis['linhas_processaveis']
                     )
                 
                 progress_bar.progress(100)
-                status_info.success("✅ Processamento SQLite concluído!")
+                status_info.success("✅ Processamento com cache de distâncias concluído!")
+                
+                # *** SALVAR RESULTADOS NO SESSION STATE PARA EVITAR PERDA ***
+                st.session_state.processamento_resultados = resultados
+                st.session_state.processamento_stats = stats_globais
+                st.session_state.processamento_concluido = True
                 
                 # Log analytics
                 sistema.analytics.log_processamento(resultados, stats_globais)
+    
+    # *** EXIBIR RESULTADOS SE EXISTIREM (MESMO APÓS REFRESH) ***
+    if st.session_state.processamento_concluido and st.session_state.processamento_resultados:
+        resultados = st.session_state.processamento_resultados
+        stats_globais = st.session_state.processamento_stats
+        
+        st.markdown("### 📊 Resultados do Processamento SQLite + Distance Cache")
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            st.metric("⏱️ Tempo Total", f"{stats_globais['tempo_total']:.2f}s")
+        with col2:
+            st.metric("🚀 Workers", stats_globais['workers_utilizados'])
+        with col3:
+            st.metric("✅ Sucessos", stats_globais['total_sucessos'])
+        with col4:
+            st.metric("❌ Erros", stats_globais['total_erros'])
+        with col5:
+            taxa_final = (stats_globais['total_sucessos'] / max(1, stats_globais['total_sucessos'] + stats_globais['total_erros'])) * 100
+            st.metric("📈 Taxa Sucesso", f"{taxa_final:.1f}%")
+        
+        # Atualizar stats do cache
+        updated_cache_stats = sistema.parallel_processor.cache.get_cache_stats()
+        
+        st.success(f"""
+        🚀 **Sistema SQLite + Cache de Distâncias - Performance Máxima!**
+        
+        ⚡ **Processamento concluído** em {stats_globais['tempo_total']:.2f}s  
+        💾 **Cache SQLite:** {updated_cache_stats['coord_hit_rate']:.1f}% hit rate coordenadas  
+        🛣️ **Cache Distâncias:** {updated_cache_stats['distance_hit_rate']:.1f}% hit rate distâncias  
+        🔧 **{stats_globais['workers_utilizados']} workers** executando em paralelo  
+        📊 **Dados persistentes** - coordenadas E distâncias salvas para sempre!
+        """)
+        
+        # Resultados detalhados
+        st.markdown("### 📋 Resultados Detalhados por Linha")
+        
+        for resultado in resultados:
+            with st.expander(f"🎯 Linha {resultado['linha_excel']}: {resultado['origem']} ({resultado['sucessos']} sucessos)"):
                 
-                # Resultados
-                if resultados:
-                    st.markdown("### 📊 Resultados do Processamento SQLite")
-                    
-                    col1, col2, col3, col4, col5 = st.columns(5)
-                    
-                    with col1:
-                        st.metric("⏱️ Tempo Total", f"{stats_globais['tempo_total']:.2f}s")
-                    with col2:
-                        st.metric("🚀 Workers", stats_globais['workers_utilizados'])
-                    with col3:
-                        st.metric("✅ Sucessos", stats_globais['total_sucessos'])
-                    with col4:
-                        st.metric("❌ Erros", stats_globais['total_erros'])
-                    with col5:
-                        taxa_final = (stats_globais['total_sucessos'] / max(1, stats_globais['total_sucessos'] + stats_globais['total_erros'])) * 100
-                        st.metric("📈 Taxa Sucesso", f"{taxa_final:.1f}%")
-                    
-                    # Atualizar stats do cache
-                    updated_cache_stats = sistema.parallel_processor.cache.get_cache_stats()
-                    
-                    st.success(f"""
-                    🚀 **Sistema SQLite - Performance Otimizada!**
-                    
-                    ⚡ **Processamento concluído** em {stats_globais['tempo_total']:.2f}s  
-                    💾 **Cache SQLite:** {updated_cache_stats['hit_rate']:.1f}% hit rate ({updated_cache_stats['total_entries']} entradas)  
-                    🔧 **{stats_globais['workers_utilizados']} workers** executando em paralelo  
-                    📊 **Dados persistentes** - coordenadas salvas para próximas execuções
-                    """)
-                    
-                    # Resultados detalhados
-                    st.markdown("### 📋 Resultados Detalhados por Linha")
-                    
-                    for resultado in resultados:
-                        with st.expander(f"🎯 Linha {resultado['linha_excel']}: {resultado['origem']} ({resultado['sucessos']} sucessos)"):
-                            
-                            col1, col2 = st.columns([2, 1])
-                            
-                            with col1:
-                                if resultado['status'] == 'concluido':
-                                    sucessos = [d for d in resultado['destinos_calculados'] if d['distancia_km'] is not None]
-                                    
-                                    if sucessos:
-                                        df_destinos = pd.DataFrame(sucessos)
-                                        df_destinos = df_destinos.sort_values('distancia_km')
-                                        df_destinos['ranking'] = range(1, len(df_destinos) + 1)
-                                        
-                                        df_display = df_destinos[['ranking', 'destino', 'distancia_km', 'tempo_min']].head(10)
-                                        df_display.columns = ['#', 'Destino', 'Distância (km)', 'Tempo (min)']
-                                        
-                                        st.dataframe(df_display, use_container_width=True, hide_index=True)
-                                        
-                                        if resultado['destino_mais_proximo']:
-                                            st.success(f"🏆 **Mais Próximo:** {resultado['destino_mais_proximo']} - {resultado['km_mais_proximo']} km")
-                            
-                            with col2:
-                                st.metric("⏱️ Tempo", f"{resultado['tempo_processamento']}s")
-                                st.metric("📊 Total", resultado['total_destinos'])
-                                st.metric("✅ Sucessos", resultado['sucessos'])
-                                st.metric("❌ Erros", resultado['erros'])
-                                
-                                st.text("💾 Cache: SQLite")
-                                
-                                if show_maps and resultado['status'] == 'concluido':
-                                    mapa_linha = sistema.mapper.create_route_map(resultado)
-                                    if mapa_linha:
-                                        st.markdown("**🗺️ Mapa:**")
-                                        st_folium(mapa_linha, width=300, height=200)
-                    
-                    # Download
-                    st.markdown("### 💾 Download do Relatório SQLite")
-                    
-                    excel_data = create_advanced_excel_sqlite(resultados, stats_globais, updated_cache_stats)
-                    
-                    if excel_data:
-                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        filename = f"relatorio_sqlite_{timestamp}.xlsx"
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    if resultado['status'] == 'concluido':
+                        sucessos = [d for d in resultado['destinos_calculados'] if d['distancia_km'] is not None]
                         
-                        st.download_button(
-                            label="📥 Baixar Relatório SQLite (Excel)",
-                            data=excel_data,
-                            file_name=filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            type="primary",
-                            use_container_width=True
-                        )
+                        if sucessos:
+                            df_destinos = pd.DataFrame(sucessos)
+                            df_destinos = df_destinos.sort_values('distancia_km')
+                            df_destinos['ranking'] = range(1, len(df_destinos) + 1)
+                            
+                            # Indicar se veio do cache
+                            df_destinos['origem_dados'] = df_destinos['status'].apply(
+                                lambda x: '💾 Cache' if x == 'cache_hit' else '🆕 API'
+                            )
+                            
+                            df_display = df_destinos[['ranking', 'destino', 'distancia_km', 'tempo_min', 'origem_dados']].head(10)
+                            df_display.columns = ['#', 'Destino', 'Distância (km)', 'Tempo (min)', 'Fonte']
+                            
+                            st.dataframe(df_display, use_container_width=True, hide_index=True)
+                            
+                            if resultado['destino_mais_proximo']:
+                                st.success(f"🏆 **Mais Próximo:** {resultado['destino_mais_proximo']} - {resultado['km_mais_proximo']} km")
+                
+                with col2:
+                    st.metric("⏱️ Tempo", f"{resultado['tempo_processamento']}s")
+                    st.metric("📊 Total", resultado['total_destinos'])
+                    st.metric("✅ Sucessos", resultado['sucessos'])
+                    st.metric("❌ Erros", resultado['erros'])
+                    
+                    st.text("💾 Cache: SQLite")
+                    st.text("🛣️ Distâncias: Cache")
+                    
+                    if show_maps and resultado['status'] == 'concluido':
+                        mapa_linha = sistema.mapper.create_route_map(resultado)
+                        if mapa_linha:
+                            st.markdown("**🗺️ Mapa:**")
+                            st_folium(mapa_linha, width=300, height=200)
+        
+        # Download
+        st.markdown("### 💾 Download do Relatório Distance Cache")
+        
+        excel_data = create_advanced_excel_distance_cache(resultados, stats_globais, updated_cache_stats)
+        
+        if excel_data:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"relatorio_distance_cache_{timestamp}.xlsx"
+            
+            st.download_button(
+                label="📥 Baixar Relatório Distance Cache (Excel)",
+                data=excel_data,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True
+            )
+        
+        # Botão para limpar resultados
+        if st.button("🗑️ Limpar Resultados", help="Remove os resultados da tela"):
+            st.session_state.processamento_resultados = None
+            st.session_state.processamento_stats = None
+            st.session_state.processamento_concluido = False
+            # NÃO USAR st.rerun() - resultados serão limpos naturalmente
 
-def create_advanced_excel_sqlite(resultados, stats_globais, cache_stats):
-    """Cria Excel com informações específicas do SQLite"""
+def create_advanced_excel_distance_cache(resultados, stats_globais, cache_stats):
+    """Cria Excel com informações específicas do cache de distâncias"""
     output = BytesIO()
     
     try:
@@ -1265,21 +1492,27 @@ def create_advanced_excel_sqlite(resultados, stats_globais, cache_stats):
                             'Tempo_Minutos': dest_data['tempo_min'],
                             'Ranking_na_Linha': i,
                             'Eh_Mais_Proximo': 'SIM' if dest_data['destino'] == resultado['destino_mais_proximo'] else 'NÃO',
+                            'Origem_Dados': 'Cache' if dest_data.get('status') == 'cache_hit' else 'API',
                             'Tempo_Processamento_Linha': resultado['tempo_processamento']
                         })
             
             if relatorio_completo:
                 df_completo = pd.DataFrame(relatorio_completo)
-                df_completo.to_excel(writer, sheet_name='Resultados_SQLite', index=False)
+                df_completo.to_excel(writer, sheet_name='Resultados_Distance_Cache', index=False)
             
-            # Métricas específicas do SQLite
+            # Métricas específicas do cache de distâncias
             performance_data = {
                 'Métrica': [
                     'Tempo Total de Processamento (s)',
                     'Cache Type',
-                    'Cache Hit Rate (%)',
+                    'Cache Hit Rate Coordenadas (%)',
+                    'Cache Hit Rate Distâncias (%)',
+                    'Hit Rate Geral (%)',
+                    'Total Coordenadas Cache',
+                    'Total Distâncias Cache',
                     'Total Entradas Cache',
-                    'Cache Hits Totais',
+                    'TTL Coordenadas (h)',
+                    'TTL Distâncias (h)',
                     'Database Path',
                     'Workers Utilizados',
                     'Linhas Processadas',
@@ -1291,10 +1524,15 @@ def create_advanced_excel_sqlite(resultados, stats_globais, cache_stats):
                 ],
                 'Valor': [
                     stats_globais['tempo_total'],
-                    'SQLite Persistente',
+                    'SQLite + Distance Cache',
+                    cache_stats['coord_hit_rate'],
+                    cache_stats['distance_hit_rate'],
                     cache_stats['hit_rate'],
+                    cache_stats['total_coordinates'],
+                    cache_stats['total_distances'],
                     cache_stats['total_entries'],
-                    cache_stats['total_cache_hits'],
+                    cache_stats['ttl_hours'],
+                    cache_stats['distance_ttl_hours'],
                     cache_stats.get('database_path', 'N/A'),
                     stats_globais['workers_utilizados'],
                     stats_globais['linhas_processadas'],
@@ -1307,7 +1545,7 @@ def create_advanced_excel_sqlite(resultados, stats_globais, cache_stats):
             }
             
             df_performance = pd.DataFrame(performance_data)
-            df_performance.to_excel(writer, sheet_name='Metricas_SQLite', index=False)
+            df_performance.to_excel(writer, sheet_name='Metricas_Distance_Cache', index=False)
         
         return output.getvalue()
         

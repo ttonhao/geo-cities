@@ -1,0 +1,6 @@
+# Cache SQLite files
+*.db
+*.db-wal
+*.db-shm
+backups/
+logs/

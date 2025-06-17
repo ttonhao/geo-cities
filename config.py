@@ -1,3 +1,4 @@
+ # type: ignore
 """
 ⚙️ CONFIGURAÇÕES AVANÇADAS DO SISTEMA
 ===================================
@@ -25,7 +26,7 @@ class CacheConfig:
 class ParallelConfig:
     """Configurações de processamento paralelo"""
     max_workers: int = 6                   # Workers padrão
-    min_workers: int = 2                   # Mínimo de workers
+    min_workers: int = 1                   # Mínimo de workers
     auto_scaling: bool = True              # Auto-scale baseado no dataset
     rate_limit_per_thread: float = 0.1     # Delay entre requisições por thread
     timeout_seconds: int = 25              # Timeout por requisição

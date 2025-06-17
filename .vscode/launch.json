@@ -1,0 +1,70 @@
+{
+//   "CONFIGURAÇÃO DE DEBUG PARA STREAMLIT NO VS CODE",
+//   "========================================================",
+  
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "🚀 Debug Streamlit App",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/venv/bin/streamlit",
+      "args": [
+        "run",
+        "${workspaceFolder}/app_completo.py",
+        "--server.port=8501",
+        "--server.address=localhost"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "STREAMLIT_ENV": "development"
+      },
+      "stopOnEntry": false,
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "🔧 Debug Python Script Direct",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/debug_script.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "🧵 Debug Threads (Attach)",
+      "type": "python",
+      "request": "attach",
+      "port": 5678,
+      "host": "localhost",
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}",
+          "remoteRoot": "."
+        }
+      ]
+    },
+    {
+      "name": "🐛 Debug with Logs",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/venv/bin/streamlit",
+      "args": [
+        "run",
+        "${workspaceFolder}/app_completo.py",
+        "--logger.level=debug"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "STREAMLIT_ENV": "development",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  ]
+}

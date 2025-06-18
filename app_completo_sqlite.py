@@ -1,12 +1,12 @@
+# app_completo_sqlite.py
 # type: ignore
-# # app_completo_sqlite.py
 """
 🚀 SISTEMA AVANÇADO DE DISTÂNCIAS - VERSÃO PRO COM SQLITE E CACHE DE DISTÂNCIAS
 =============================================================================
 
-VERSÃO COMPLETA: Sistema original + Cache SQLite + Cache de Distâncias
+VERSÃO COMPLETA: Sistema original + Cache SQLite + Cache de Distâncias + Melhorias
 - ✅ Cache SQLite persistente entre sessões
-- ✅ Cache de DISTÂNCIAS calculadas (NEW!)
+- ✅ Cache de DISTÂNCIAS calculadas
 - ✅ Performance otimizada com índices
 - ✅ TTL automático e limpeza
 - ✅ Backup e restore automático
@@ -15,8 +15,10 @@ VERSÃO COMPLETA: Sistema original + Cache SQLite + Cache de Distâncias
 - ✅ Mapas Interativos completos
 - ✅ Painel de administração do banco
 - ✅ Correção de refresh da página
+- 🆕 Tracking detalhado de erros por origem-destino
+- 🆕 Ignora quando origem = destino
 
-Versão: 3.2.0 - Pro SQLite + Distance Cache
+Versão: 3.2.1 - Pro SQLite + Distance Cache + Error Tracking
 """
 
 import streamlit as st
@@ -226,6 +228,14 @@ st.markdown("""
         margin: 1rem 0;
         border-left: 4px solid #ff9500;
     }
+    
+    .error-panel {
+        background: linear-gradient(135deg, #ff6b6b 0%, #feca57 100%);
+        padding: 1rem;
+        border-radius: 12px;
+        margin: 1rem 0;
+        border-left: 4px solid #e74c3c;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -330,7 +340,7 @@ class SQLiteCacheWithDistances:
         conn.commit()
         conn.close()
         
-        self._update_stats('coord_save')
+        self._update_stats('coord_saves')
         debugger.debug(f"SQLite: Coordenadas salvas - {city_name}")
     
     def get_coordinates(self, city_name):
@@ -384,7 +394,7 @@ class SQLiteCacheWithDistances:
         conn.commit()
         conn.close()
         
-        self._update_stats('distance_save')
+        self._update_stats('distance_saves')
         debugger.debug(f"SQLite: Distância salva - {origin_city} -> {destination_city} = {distance_km}km")
     
     def get_distance(self, origin_city: str, destination_city: str):
@@ -570,13 +580,13 @@ class SQLiteCacheWithDistances:
         }
 
 # ================================
-# PROCESSAMENTO PARALELO COM CACHE DE DISTÂNCIAS
+# PROCESSAMENTO PARALELO COM CACHE DE DISTÂNCIAS E TRACKING DE ERROS
 # ================================
 
 class ParallelProcessor:
     def __init__(self, max_workers=4):
         self.max_workers = max_workers
-        self.geocoder = Nominatim(user_agent="parallel_processor_distance_cache_v3", timeout=20) 
+        self.geocoder = Nominatim(user_agent="parallel_processor_error_tracking_v3", timeout=20) 
         
         # Usar cache SQLite com distâncias
         if DEBUG_MODE:
@@ -584,7 +594,7 @@ class ParallelProcessor:
         else:
             self.cache = SQLiteCacheWithDistances("cache/prod_geocoding_cache.db", ttl_hours=24, distance_ttl_hours=168)
         
-        debugger.info(f"ParallelProcessor inicializado com cache de DISTÂNCIAS ({max_workers} workers)")
+        debugger.info(f"ParallelProcessor inicializado com tracking de erros ({max_workers} workers)")
         
         # Migrar dados do cache em memória se existir
         self._migrate_memory_cache()
@@ -709,21 +719,26 @@ class ParallelProcessor:
                     time.sleep(2 ** attempt)
                     continue
         
-        debugger.error("Todas as tentativas de cálculo falharam")
-        return {'status': 'erro_calculo', 'distancia_km': None, 'tempo_min': None}
+        debugger.error(f"Todas as tentativas de cálculo falharam: {origin_city} -> {destination_city}")
+        return {
+            'status': 'erro_calculo', 
+            'distancia_km': None, 
+            'tempo_min': None,
+            'erro_detalhes': f'Falha ao calcular rota {origin_city} -> {destination_city}'
+        }
     
     @debug_timing
     def process_linha_paralela(self, linha_data):
-        """Processa uma linha com cache SQLite e cache de distâncias"""
+        """Processa uma linha com cache SQLite, cache de distâncias e tracking detalhado de erros"""
         linha_excel = linha_data['linha_excel']
         origem = linha_data['origem']
         destinos = linha_data['destinos']
         
-        debug_breakpoint("Processamento com cache de distâncias", {
+        debug_breakpoint("Processamento com tracking de erros", {
             'linha_excel': linha_excel,
             'origem': origem,
             'total_destinos': len(destinos),
-            'cache_type': 'SQLite + Distance Cache'
+            'cache_type': 'SQLite + Distance Cache + Error Tracking'
         })
         
         resultado = {
@@ -736,7 +751,8 @@ class ParallelProcessor:
             'sucessos': 0,
             'erros': 0,
             'tempo_processamento': 0,
-            'status': 'processando'
+            'status': 'processando',
+            'erros_detalhados': []  # *** NOVO: Lista de erros específicos ***
         }
         
         start_time = time.time()
@@ -747,6 +763,14 @@ class ParallelProcessor:
         if not origin_coords:
             resultado['status'] = 'origem_nao_encontrada'
             resultado['erros'] = len(destinos)
+            # *** NOVO: Registrar erro específico da origem ***
+            resultado['erros_detalhados'].append({
+                'tipo': 'geocoding_origem',
+                'origem': origem,
+                'destino': 'N/A',
+                'erro': 'Coordenadas da origem não encontradas'
+            })
+            debugger.error(f"Origem não encontrada: {origem}")
             return resultado
         
         # Geocoding paralelo dos destinos
@@ -762,20 +786,39 @@ class ParallelProcessor:
                 destino, coords = future.result()
                 destinos_com_coords.append((destino, coords))
         
-        # Cálculo paralelo das distâncias COM CACHE
+        # Cálculo paralelo das distâncias COM CACHE E TRACKING DE ERROS
         def calcular_distancia_destino(item):
             destino, dest_coords = item
+            
             if not dest_coords:
+                # *** NOVO: Erro específico de geocoding do destino ***
+                erro_detalhado = {
+                    'tipo': 'geocoding_destino',
+                    'origem': origem,
+                    'destino': destino,
+                    'erro': 'Coordenadas do destino não encontradas'
+                }
                 return {
                     'destino': destino,
                     'distancia_km': None,
                     'tempo_min': None,
-                    'status': 'coordenadas_nao_encontradas'
+                    'status': 'coordenadas_nao_encontradas',
+                    'erro_detalhado': erro_detalhado
                 }
             
             # *** PASSOU ORIGEM E DESTINO PARA O CACHE ***
             resultado_calc = self.calculate_distance_with_retry(origin_coords, dest_coords, origem, destino)
             resultado_calc['destino'] = destino
+            
+            # *** NOVO: Adicionar erro detalhado se falhou ***
+            if resultado_calc['status'] not in ['sucesso', 'cache_hit']:
+                erro_detalhado = {
+                    'tipo': 'calculo_distancia',
+                    'origem': origem,
+                    'destino': destino,
+                    'erro': resultado_calc.get('erro_detalhes', 'Erro no cálculo da distância via API')
+                }
+                resultado_calc['erro_detalhado'] = erro_detalhado
             
             time.sleep(0.1)
             return resultado_calc
@@ -791,6 +834,9 @@ class ParallelProcessor:
                     resultado['sucessos'] += 1
                 else:
                     resultado['erros'] += 1
+                    # *** NOVO: Adicionar erro detalhado à lista ***
+                    if 'erro_detalhado' in calc_resultado:
+                        resultado['erros_detalhados'].append(calc_resultado['erro_detalhado'])
         
         # Identificar mais próximo
         sucessos = [d for d in resultado['destinos_calculados'] if d['distancia_km'] is not None]
@@ -803,11 +849,17 @@ class ParallelProcessor:
         resultado['tempo_processamento'] = round(time.time() - start_time, 2)
         resultado['status'] = 'concluido'
         
+        # *** LOG DOS ERROS DETALHADOS ***
+        if resultado['erros_detalhados']:
+            debugger.warning(f"Linha {linha_excel} - {len(resultado['erros_detalhados'])} erros específicos registrados")
+            for erro in resultado['erros_detalhados']:
+                debugger.error(f"Erro {erro['tipo']}: {erro['origem']} -> {erro['destino']} - {erro['erro']}")
+        
         return resultado
     
     @debug_timing
     def process_all_lines_parallel(self, linhas_processaveis):
-        """Processa todas as linhas em paralelo com cache de distâncias"""
+        """Processa todas as linhas em paralelo com cache de distâncias e tracking de erros"""
         start_time = time.time()
         
         resultados = []
@@ -824,6 +876,11 @@ class ParallelProcessor:
         
         resultados.sort(key=lambda x: x['linha_excel'])
         
+        # *** NOVO: Agregar erros de todas as linhas ***
+        todos_erros = []
+        for resultado in resultados:
+            todos_erros.extend(resultado.get('erros_detalhados', []))
+        
         stats_globais = {
             'tempo_total': round(time.time() - start_time, 2),
             'linhas_processadas': len(resultados),
@@ -832,8 +889,22 @@ class ParallelProcessor:
             'media_tempo_por_linha': round(sum(r['tempo_processamento'] for r in resultados) / len(resultados), 2),
             'processamento_paralelo': True,
             'workers_utilizados': self.max_workers,
-            'cache_type': 'SQLite + Distance Cache'
+            'cache_type': 'SQLite + Distance Cache',
+            'erros_detalhados': todos_erros  # *** NOVO: Lista completa de erros ***
         }
+        
+        # *** LOG RESUMO DOS ERROS ***
+        if todos_erros:
+            debugger.warning(f"Processamento concluído com {len(todos_erros)} erros específicos")
+            
+            # Contar tipos de erro
+            tipos_erro = {}
+            for erro in todos_erros:
+                tipo = erro['tipo']
+                tipos_erro[tipo] = tipos_erro.get(tipo, 0) + 1
+            
+            for tipo, count in tipos_erro.items():
+                debugger.warning(f"  - {tipo}: {count} ocorrências")
         
         return resultados, stats_globais
 
@@ -865,7 +936,8 @@ class AnalyticsDashboard:
             'taxa_sucesso': (stats_globais['total_sucessos'] / max(1, stats_globais['total_sucessos'] + stats_globais['total_erros'])) * 100,
             'processamento_paralelo': stats_globais.get('processamento_paralelo', False),
             'workers': stats_globais.get('workers_utilizados', 1),
-            'cache_type': stats_globais.get('cache_type', 'Memory')
+            'cache_type': stats_globais.get('cache_type', 'Memory'),
+            'erros_detalhados': len(stats_globais.get('erros_detalhados', []))  # *** NOVO ***
         }
         
         st.session_state.analytics['processamentos'].append(log_entry)
@@ -895,6 +967,11 @@ class AnalyticsDashboard:
             with col4:
                 cache_type = ultimo_processamento.get('cache_type', 'Memory')
                 st.metric("💾 Cache Type", cache_type)
+            
+            # *** NOVO: Mostrar info sobre erros detalhados ***
+            total_erros_detalhados = sum(p.get('erros_detalhados', 0) for p in analytics['processamentos'])
+            if total_erros_detalhados > 0:
+                st.info(f"🔍 **Tracking de Erros Ativo** - {total_erros_detalhados} erros detalhados registrados")
             
             # Mostrar se está usando cache de distâncias
             if 'Distance Cache' in ultimo_processamento.get('cache_type', ''):
@@ -1052,16 +1129,137 @@ def show_sqlite_admin_panel(cache_system):
             if st.checkbox("⚠️ Confirmar limpeza total"):
                 cache_system.clear_cache()
                 st.success("✅ Cache limpo completamente")
-                # NÃO USAR st.rerun() para evitar refresh
     
     with col3:
         if st.button("📊 Atualizar Stats", help="Atualiza estatísticas"):
-            # NÃO USAR st.rerun() - apenas recarregará naturalmente
             pass
     
     # Informações técnicas
     with st.expander("🔧 Informações Técnicas Detalhadas"):
         st.json(db_info)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ================================
+# NOVA FUNÇÃO PARA EXIBIR ERROS DETALHADOS
+# ================================
+
+def show_detailed_errors(erros_detalhados):
+    """Exibe painel de erros detalhados"""
+    if not erros_detalhados:
+        return
+    
+    st.markdown('<div class="error-panel">', unsafe_allow_html=True)
+    st.markdown("### 🚨 Erros Detalhados por Origem-Destino")
+    
+    # Estatísticas dos erros
+    col1, col2, col3 = st.columns(3)
+    
+    total_erros = len(erros_detalhados)
+    tipos_erro = {}
+    origens_com_erro = set()
+    destinos_com_erro = set()
+    
+    for erro in erros_detalhados:
+        tipo = erro['tipo']
+        tipos_erro[tipo] = tipos_erro.get(tipo, 0) + 1
+        origens_com_erro.add(erro['origem'])
+        destinos_com_erro.add(erro['destino'])
+    
+    with col1:
+        st.metric("🚨 Total de Erros", total_erros)
+    with col2:
+        st.metric("🏠 Origens Afetadas", len(origens_com_erro))
+    with col3:
+        st.metric("🎯 Destinos Afetados", len(destinos_com_erro))
+    
+    # Distribuição dos tipos de erro
+    st.markdown("#### 📊 Distribuição por Tipo de Erro")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        if tipos_erro:
+            df_erros = pd.DataFrame([
+                {'Tipo de Erro': tipo, 'Quantidade': qtd}
+                for tipo, qtd in tipos_erro.items()
+            ])
+            
+            fig_erros = px.bar(
+                df_erros,
+                x='Tipo de Erro',
+                y='Quantidade',
+                title="Tipos de Erro",
+                color='Quantidade',
+                color_continuous_scale='Reds'
+            )
+            st.plotly_chart(fig_erros, use_container_width=True)
+    
+    with col2:
+        st.markdown("**Tipos de Erro:**")
+        for tipo, qtd in tipos_erro.items():
+            emoji = {
+                'geocoding_origem': '🏠',
+                'geocoding_destino': '🎯',
+                'calculo_distancia': '🛣️'
+            }.get(tipo, '❌')
+            st.metric(f"{emoji} {tipo.replace('_', ' ').title()}", qtd)
+    
+    # Tabela detalhada de erros
+    st.markdown("#### 📋 Lista Detalhada de Erros")
+    
+    # Preparar dados para a tabela
+    df_erros_detalhados = pd.DataFrame(erros_detalhados)
+    df_erros_detalhados['par_origem_destino'] = df_erros_detalhados['origem'] + ' → ' + df_erros_detalhados['destino']
+    
+    # Adicionar emoji por tipo
+    df_erros_detalhados['tipo_emoji'] = df_erros_detalhados['tipo'].map({
+        'geocoding_origem': '🏠 Geocoding Origem',
+        'geocoding_destino': '🎯 Geocoding Destino',
+        'calculo_distancia': '🛣️ Cálculo Distância'
+    })
+    
+    # Filtros para a tabela
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        filtro_tipo = st.selectbox(
+            "Filtrar por Tipo:",
+            options=['Todos'] + list(tipos_erro.keys()),
+            index=0
+        )
+    
+    with col2:
+        filtro_origem = st.selectbox(
+            "Filtrar por Origem:",
+            options=['Todas'] + sorted(list(origens_com_erro)),
+            index=0
+        )
+    
+    # Aplicar filtros
+    df_filtrado = df_erros_detalhados.copy()
+    
+    if filtro_tipo != 'Todos':
+        df_filtrado = df_filtrado[df_filtrado['tipo'] == filtro_tipo]
+    
+    if filtro_origem != 'Todas':
+        df_filtrado = df_filtrado[df_filtrado['origem'] == filtro_origem]
+    
+    # Exibir tabela
+    if not df_filtrado.empty:
+        df_display = df_filtrado[['tipo_emoji', 'par_origem_destino', 'erro']].copy()
+        df_display.columns = ['Tipo', 'Origem → Destino', 'Descrição do Erro']
+        
+        st.dataframe(
+            df_display,
+            use_container_width=True,
+            hide_index=True,
+            height=min(400, len(df_display) * 35 + 50)
+        )
+        
+        st.info(f"📊 Mostrando {len(df_filtrado)} de {total_erros} erros")
+    else:
+        st.warning("🔍 Nenhum erro encontrado com os filtros aplicados")
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1136,7 +1334,7 @@ class AdvancedDistanceSystemSQLite:
         self.parallel_processor = ParallelProcessor(max_workers=6)
         self.analytics = AnalyticsDashboard()
         self.mapper = InteractiveMapper()
-        debugger.info("AdvancedDistanceSystemSQLite inicializado com cache de DISTÂNCIAS")
+        debugger.info("AdvancedDistanceSystemSQLite inicializado com tracking de erros")
         
     @debug_timing
     def analyze_spreadsheet_advanced(self, df):
@@ -1145,6 +1343,7 @@ class AdvancedDistanceSystemSQLite:
             destino_cols = df.columns[2:] if len(df.columns) > 2 else []
             
             linhas_processaveis = []
+            destinos_ignorados = 0  # *** NOVO: Contador de destinos ignorados ***
             
             for idx, row in df.iterrows():
                 origem = self._clean_city_name(row[origem_col])
@@ -1155,8 +1354,13 @@ class AdvancedDistanceSystemSQLite:
                 destinos_linha = []
                 for col in destino_cols:
                     destino = self._clean_city_name(row[col])
-                    if destino:
+                    
+                    # *** NOVO: Ignorar quando origem = destino ***
+                    if destino and destino != origem:
                         destinos_linha.append(destino)
+                    elif destino == origem:
+                        destinos_ignorados += 1
+                        debugger.info(f"Ignorando destino igual à origem: {origem} = {destino}")
                 
                 if destinos_linha:
                     linhas_processaveis.append({
@@ -1166,14 +1370,21 @@ class AdvancedDistanceSystemSQLite:
                         'total_destinos': len(destinos_linha)
                     })
             
-            return {
+            analysis = {
                 'total_rows_original': len(df),
                 'linhas_processaveis': linhas_processaveis,
                 'total_linhas_validas': len(linhas_processaveis),
                 'total_calculos': sum(linha['total_destinos'] for linha in linhas_processaveis),
-                'estimativa_tempo_paralelo': sum(linha['total_destinos'] for linha in linhas_processaveis) * 0.05 / 60,  # Menor devido ao cache
+                'destinos_ignorados': destinos_ignorados,  # *** NOVO ***
+                'estimativa_tempo_paralelo': sum(linha['total_destinos'] for linha in linhas_processaveis) * 0.05 / 60,
                 'estimativa_tempo_sequencial': sum(linha['total_destinos'] for linha in linhas_processaveis) * 0.3 / 60
             }
+            
+            # *** NOVO: Log sobre destinos ignorados ***
+            if destinos_ignorados > 0:
+                debugger.info(f"Análise concluída: {destinos_ignorados} destinos ignorados (origem = destino)")
+            
+            return analysis
             
         except Exception as e:
             st.error(f"❌ Erro na análise: {e}")
@@ -1200,7 +1411,7 @@ def show_debug_panel():
     
     with st.sidebar:
         st.markdown('<div class="debug-panel">', unsafe_allow_html=True)
-        st.markdown("### 🐛 Debug Panel Distance Cache")
+        st.markdown("### 🐛 Debug Panel Error Tracking")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -1228,32 +1439,31 @@ def show_debug_panel():
         if st.button("🗑️ Limpar Logs Debug"):
             st.session_state.debug_logs = []
             st.success("Logs limpos!")
-            # NÃO USAR st.rerun()
         
         st.markdown('</div>', unsafe_allow_html=True)
 
 def main():
-    """Função principal COMPLETA com SQLite + Cache de Distâncias"""
+    """Função principal COMPLETA com SQLite + Cache de Distâncias + Error Tracking"""
     
-    debugger.info("=== INICIANDO APLICAÇÃO COM CACHE DE DISTÂNCIAS ===")
+    debugger.info("=== INICIANDO APLICAÇÃO COM TRACKING DE ERROS ===")
     
     # Painel de debug
     show_debug_panel()
     
     # Header
-    header_text = "🚀 Sistema Avançado de Distâncias - SQLite + Distance Cache"
+    header_text = "🚀 Sistema Avançado de Distâncias - SQLite + Distance Cache + Error Tracking"
     if DEBUG_MODE:
         header_text += " (Debug Mode)"
     
     st.markdown(f"""
     <div class="main-header">
         <h1>{header_text}</h1>
-        <h3>💾 Cache SQLite • 🛣️ Cache de Distâncias • Processamento Paralelo • Analytics</h3>
-        <p>Versão 3.2.0 - Pro SQLite + Distance Cache</p>
+        <h3>💾 Cache SQLite • 🛣️ Cache de Distâncias • 🚨 Tracking de Erros • Analytics</h3>
+        <p>Versão 3.2.1 - Pro SQLite + Distance Cache + Error Tracking</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # Inicializar sistema com SQLite + cache de distâncias
+    # Inicializar sistema com SQLite + cache de distâncias + tracking de erros
     sistema = AdvancedDistanceSystemSQLite()
     
     # *** CONTROLE DE ESTADO DOS RESULTADOS ***
@@ -1271,7 +1481,7 @@ def main():
         
         # Performance
         st.markdown("#### 🚀 Performance")
-        max_workers = st.slider("🔧 Workers Paralelos", 2, 8, 6)
+        max_workers = st.slider("🔧 Workers Paralelos", 1, 8, 6)
         sistema.parallel_processor.max_workers = max_workers
         
         # Cache SQLite controls
@@ -1287,9 +1497,10 @@ def main():
         
         # Toggles
         show_analytics = st.checkbox("📊 Mostrar Analytics", value=True)
-        show_maps = st.checkbox("🗺️ Mostrar Mapas", value=True)
+        show_maps = st.checkbox("🗺️ Mostrar Mapas", value=False)
+        show_detailed_errors_panel = st.checkbox("🚨 Mostrar Erros Detalhados", value=True)  # *** NOVO ***
         
-        st.success("💾 SQLite + 🛣️ Distance Cache Ativo")
+        st.success("💾 SQLite + 🛣️ Distance Cache + 🚨 Error Tracking Ativo")
     
     # Analytics Dashboard
     if show_analytics:
@@ -1300,14 +1511,14 @@ def main():
     uploaded_file = st.file_uploader(
         "📁 Upload da Planilha Excel",
         type=['xlsx', 'xls'],
-        help="Sistema com cache SQLite persistente E cache de distâncias"
+        help="Sistema com cache SQLite persistente, cache de distâncias E tracking de erros detalhado"
     )
     
     if uploaded_file is not None:
-        debug_breakpoint("Arquivo carregado para processamento com cache de distâncias", {
+        debug_breakpoint("Arquivo carregado para processamento com error tracking", {
             'filename': uploaded_file.name,
             'size': uploaded_file.size,
-            'cache_type': 'SQLite + Distance Cache'
+            'cache_type': 'SQLite + Distance Cache + Error Tracking'
         })
         
         with st.spinner("🔍 Análise avançada da planilha..."):
@@ -1315,7 +1526,7 @@ def main():
             analysis = sistema.analyze_spreadsheet_advanced(df)
         
         if analysis:
-            st.success("✅ Planilha analisada - Sistema SQLite + Cache de Distâncias ativo!")
+            st.success("✅ Planilha analisada - Sistema SQLite + Cache de Distâncias + Error Tracking ativo!")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -1326,38 +1537,41 @@ def main():
             with col3:
                 st.metric("⏱️ Tempo Est.", f"{analysis['estimativa_tempo_paralelo']:.1f} min")
             with col4:
-                speedup = analysis['estimativa_tempo_sequencial'] / analysis['estimativa_tempo_paralelo']
-                st.metric("🚀 Speedup", f"{speedup:.1f}x")
+                # *** NOVO: Mostrar destinos ignorados ***
+                st.metric("🚫 Origem=Destino", analysis['destinos_ignorados'])
             
-            # Info do cache de distâncias
-            st.info("💾 **Cache SQLite + 🛣️ Cache de Distâncias ativos** - Coordenadas E distâncias são reutilizadas!")
+            # Info das melhorias
+            if analysis['destinos_ignorados'] > 0:
+                st.info(f"🚫 **{analysis['destinos_ignorados']} destinos ignorados** - quando origem = destino")
+            
+            st.info("💾 **Cache SQLite + 🛣️ Cache de Distâncias + 🚨 Error Tracking ativos**")
             
             # Processamento
-            if st.button("🚀 Processar com Cache de Distâncias", type="primary", use_container_width=True):
+            if st.button("🚀 Processar com Error Tracking", type="primary", use_container_width=True):
                 
-                debug_breakpoint("Início processamento com cache de distâncias", {
+                debug_breakpoint("Início processamento com error tracking", {
                     'total_linhas': analysis['total_linhas_validas'],
-                    'cache_type': 'SQLite + Distance Cache',
+                    'cache_type': 'SQLite + Distance Cache + Error Tracking',
                     'workers': max_workers
                 })
                 
-                st.markdown("### ⚡ Processamento Paralelo com Cache SQLite + Distâncias")
+                st.markdown("### ⚡ Processamento Paralelo com Cache SQLite + Distâncias + Error Tracking")
                 
                 progress_bar = st.progress(0)
                 status_info = st.empty()
                 
                 start_time = time.time()
                 
-                status_info.info("🚀 Iniciando processamento com cache de distâncias...")
+                status_info.info("🚀 Iniciando processamento com tracking de erros...")
                 progress_bar.progress(20)
                 
-                with st.spinner("Executando processamento com cache SQLite + distâncias..."):
+                with st.spinner("Executando processamento com cache SQLite + distâncias + error tracking..."):
                     resultados, stats_globais = sistema.parallel_processor.process_all_lines_parallel(
                         analysis['linhas_processaveis']
                     )
                 
                 progress_bar.progress(100)
-                status_info.success("✅ Processamento com cache de distâncias concluído!")
+                status_info.success("✅ Processamento com error tracking concluído!")
                 
                 # *** SALVAR RESULTADOS NO SESSION STATE PARA EVITAR PERDA ***
                 st.session_state.processamento_resultados = resultados
@@ -1372,7 +1586,7 @@ def main():
         resultados = st.session_state.processamento_resultados
         stats_globais = st.session_state.processamento_stats
         
-        st.markdown("### 📊 Resultados do Processamento SQLite + Distance Cache")
+        st.markdown("### 📊 Resultados do Processamento SQLite + Distance Cache + Error Tracking")
         
         col1, col2, col3, col4, col5 = st.columns(5)
         
@@ -1385,27 +1599,44 @@ def main():
         with col4:
             st.metric("❌ Erros", stats_globais['total_erros'])
         with col5:
-            taxa_final = (stats_globais['total_sucessos'] / max(1, stats_globais['total_sucessos'] + stats_globais['total_erros'])) * 100
-            st.metric("📈 Taxa Sucesso", f"{taxa_final:.1f}%")
+            # *** NOVO: Mostrar total de erros detalhados ***
+            total_erros_detalhados = len(stats_globais.get('erros_detalhados', []))
+            st.metric("🚨 Erros Detalhados", total_erros_detalhados)
+        
+        # Taxa de sucesso
+        taxa_final = (stats_globais['total_sucessos'] / max(1, stats_globais['total_sucessos'] + stats_globais['total_erros'])) * 100
         
         # Atualizar stats do cache
         updated_cache_stats = sistema.parallel_processor.cache.get_cache_stats()
         
+        # *** NOVO: Informação sobre erros detalhados ***
+        error_info = ""
+        if total_erros_detalhados > 0:
+            error_info = f"\n🚨 **{total_erros_detalhados} erros específicos** rastreados por origem-destino"
+        
         st.success(f"""
-        🚀 **Sistema SQLite + Cache de Distâncias - Performance Máxima!**
+        🚀 **Sistema SQLite + Cache de Distâncias + Error Tracking - Performance Máxima!**
         
         ⚡ **Processamento concluído** em {stats_globais['tempo_total']:.2f}s  
         💾 **Cache SQLite:** {updated_cache_stats['coord_hit_rate']:.1f}% hit rate coordenadas  
         🛣️ **Cache Distâncias:** {updated_cache_stats['distance_hit_rate']:.1f}% hit rate distâncias  
-        🔧 **{stats_globais['workers_utilizados']} workers** executando em paralelo  
-        📊 **Dados persistentes** - coordenadas E distâncias salvas para sempre!
+        📈 **Taxa de Sucesso:** {taxa_final:.1f}%  
+        🔧 **{stats_globais['workers_utilizados']} workers** executando em paralelo{error_info}
         """)
+        
+        # *** NOVO: Painel de erros detalhados ***
+        if show_detailed_errors_panel and stats_globais.get('erros_detalhados'):
+            show_detailed_errors(stats_globais['erros_detalhados'])
         
         # Resultados detalhados
         st.markdown("### 📋 Resultados Detalhados por Linha")
         
         for resultado in resultados:
-            with st.expander(f"🎯 Linha {resultado['linha_excel']}: {resultado['origem']} ({resultado['sucessos']} sucessos)"):
+            # *** NOVO: Indicar se há erros na linha ***
+            erros_linha = len(resultado.get('erros_detalhados', []))
+            erro_indicator = f" (🚨 {erros_linha} erros)" if erros_linha > 0 else ""
+            
+            with st.expander(f"🎯 Linha {resultado['linha_excel']}: {resultado['origem']} ({resultado['sucessos']} sucessos{erro_indicator})"):
                 
                 col1, col2 = st.columns([2, 1])
                 
@@ -1430,6 +1661,17 @@ def main():
                             
                             if resultado['destino_mais_proximo']:
                                 st.success(f"🏆 **Mais Próximo:** {resultado['destino_mais_proximo']} - {resultado['km_mais_proximo']} km")
+                        
+                        # *** NOVO: Mostrar erros da linha se houver ***
+                        if resultado.get('erros_detalhados'):
+                            st.markdown("**🚨 Erros nesta linha:**")
+                            for erro in resultado['erros_detalhados']:
+                                emoji_tipo = {
+                                    'geocoding_origem': '🏠',
+                                    'geocoding_destino': '🎯',
+                                    'calculo_distancia': '🛣️'
+                                }.get(erro['tipo'], '❌')
+                                st.error(f"{emoji_tipo} {erro['origem']} → {erro['destino']}: {erro['erro']}")
                 
                 with col2:
                     st.metric("⏱️ Tempo", f"{resultado['tempo_processamento']}s")
@@ -1437,8 +1679,13 @@ def main():
                     st.metric("✅ Sucessos", resultado['sucessos'])
                     st.metric("❌ Erros", resultado['erros'])
                     
+                    # *** NOVO: Mostrar quantidade de erros detalhados ***
+                    if resultado.get('erros_detalhados'):
+                        st.metric("🚨 Erros Detalhados", len(resultado['erros_detalhados']))
+                    
                     st.text("💾 Cache: SQLite")
                     st.text("🛣️ Distâncias: Cache")
+                    st.text("🚨 Error Tracking: ON")
                     
                     if show_maps and resultado['status'] == 'concluido':
                         mapa_linha = sistema.mapper.create_route_map(resultado)
@@ -1447,32 +1694,40 @@ def main():
                             st_folium(mapa_linha, width=300, height=200)
         
         # Download
-        st.markdown("### 💾 Download do Relatório Distance Cache")
+        st.markdown("### 💾 Download do Relatório Error Tracking")
         
-        excel_data = create_advanced_excel_distance_cache(resultados, stats_globais, updated_cache_stats)
+        excel_data = create_advanced_excel_error_tracking(resultados, stats_globais, updated_cache_stats)
         
         if excel_data:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"relatorio_distance_cache_{timestamp}.xlsx"
+            filename = f"relatorio_error_tracking_{timestamp}.xlsx"
             
             st.download_button(
-                label="📥 Baixar Relatório Distance Cache (Excel)",
+                label="📥 Baixar Relatório Error Tracking (Excel)",
                 data=excel_data,
                 file_name=filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 use_container_width=True
             )
+            
+            st.info("""
+            📊 **Relatório Error Tracking contém:**
+            - 📋 Resultados detalhados por linha
+            - 🚨 Lista completa de erros por origem-destino
+            - 📊 Estatísticas de tipos de erro
+            - 💾 Métricas de cache SQLite e distâncias
+            - ⚡ Analytics de performance
+            """)
         
         # Botão para limpar resultados
         if st.button("🗑️ Limpar Resultados", help="Remove os resultados da tela"):
             st.session_state.processamento_resultados = None
             st.session_state.processamento_stats = None
             st.session_state.processamento_concluido = False
-            # NÃO USAR st.rerun() - resultados serão limpos naturalmente
 
-def create_advanced_excel_distance_cache(resultados, stats_globais, cache_stats):
-    """Cria Excel com informações específicas do cache de distâncias"""
+def create_advanced_excel_error_tracking(resultados, stats_globais, cache_stats):
+    """Cria Excel com informações específicas de error tracking"""
     output = BytesIO()
     
     try:
@@ -1498,13 +1753,29 @@ def create_advanced_excel_distance_cache(resultados, stats_globais, cache_stats)
             
             if relatorio_completo:
                 df_completo = pd.DataFrame(relatorio_completo)
-                df_completo.to_excel(writer, sheet_name='Resultados_Distance_Cache', index=False)
+                df_completo.to_excel(writer, sheet_name='Resultados_Sucessos', index=False)
             
-            # Métricas específicas do cache de distâncias
+            # *** NOVA ABA: Erros Detalhados ***
+            erros_detalhados = stats_globais.get('erros_detalhados', [])
+            if erros_detalhados:
+                df_erros = pd.DataFrame(erros_detalhados)
+                df_erros['Par_Origem_Destino'] = df_erros['origem'] + ' → ' + df_erros['destino']
+                df_erros = df_erros[['tipo', 'origem', 'destino', 'Par_Origem_Destino', 'erro']]
+                df_erros.columns = ['Tipo_Erro', 'Origem', 'Destino', 'Par_Origem_Destino', 'Descricao_Erro']
+                df_erros.to_excel(writer, sheet_name='Erros_Detalhados', index=False)
+                
+                # Estatísticas de erros
+                tipos_erro = df_erros['Tipo_Erro'].value_counts().reset_index()
+                tipos_erro.columns = ['Tipo_Erro', 'Quantidade']
+                tipos_erro.to_excel(writer, sheet_name='Estatisticas_Erros', index=False)
+            
+            # Métricas específicas do error tracking
             performance_data = {
                 'Métrica': [
                     'Tempo Total de Processamento (s)',
                     'Cache Type',
+                    'Error Tracking Ativo',
+                    'Total de Erros Detalhados',
                     'Cache Hit Rate Coordenadas (%)',
                     'Cache Hit Rate Distâncias (%)',
                     'Hit Rate Geral (%)',
@@ -1524,7 +1795,9 @@ def create_advanced_excel_distance_cache(resultados, stats_globais, cache_stats)
                 ],
                 'Valor': [
                     stats_globais['tempo_total'],
-                    'SQLite + Distance Cache',
+                    'SQLite + Distance Cache + Error Tracking',
+                    'SIM',
+                    len(erros_detalhados),
                     cache_stats['coord_hit_rate'],
                     cache_stats['distance_hit_rate'],
                     cache_stats['hit_rate'],
@@ -1545,7 +1818,7 @@ def create_advanced_excel_distance_cache(resultados, stats_globais, cache_stats)
             }
             
             df_performance = pd.DataFrame(performance_data)
-            df_performance.to_excel(writer, sheet_name='Metricas_Distance_Cache', index=False)
+            df_performance.to_excel(writer, sheet_name='Metricas_Error_Tracking', index=False)
         
         return output.getvalue()
         
